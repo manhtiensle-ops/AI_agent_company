@@ -1,0 +1,8 @@
+{
+  "max_departments_per_company": 5,
+  "max_workers_per_dept": 6,
+  "max_devops_subagents": 10,
+  "max_steps_per_task": 30,
+  "max_pingpong_turns": 8,
+  "default_model": "auto/best-coding"
+}
