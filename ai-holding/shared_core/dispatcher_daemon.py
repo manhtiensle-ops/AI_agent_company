@@ -188,6 +188,9 @@ class DispatcherDaemon:
                 new_mem = parts[1].strip()
                 save_agent_memory(receiver_dir, new_mem)
 
+            # Process Autonomous Actions
+            await self._process_agent_actions(receiver, receiver_dir, content)
+
             update_message_status(msg_id, "DONE")
             update_agent_runtime_state(receiver, mode, "IDLE", "Awaiting next task", tokens)
             logger.info(f"Message #{msg_id} to '{receiver}' successfully completed.")
@@ -196,6 +199,93 @@ class DispatcherDaemon:
             logger.error(f"Error processing message #{msg_id} for '{receiver}': {e}", exc_info=True)
             update_message_status(msg_id, "FAILED")
             update_agent_runtime_state(receiver, mode, "ERROR", f"Failed: {str(e)}")
+
+    async def _process_agent_actions(self, agent_path: str, agent_dir: Path, content: str) -> None:
+        import re
+        import subprocess
+        from shared_core.agent_provisioner import spawn_subordinate
+
+        # Determine company name if agent belongs to a company
+        comp_name = None
+        if agent_path.startswith("companies/"):
+            parts = agent_path.split("/")
+            if len(parts) >= 2:
+                comp_name = parts[1]
+
+        # 1. Shell commands: ```action:shell ... ``` or ```bash ... ```
+        shell_blocks = re.findall(r"```(?:action:shell|shell|bash)\s*\n(.*?)\n```", content, re.DOTALL)
+        for cmd in shell_blocks:
+            cmd = cmd.strip()
+            if not cmd:
+                continue
+            workdir = agent_dir
+            if comp_name:
+                comp_ws = AI_HOLDING_ROOT / "companies" / comp_name / "workspace"
+                comp_ws.mkdir(parents=True, exist_ok=True)
+                workdir = comp_ws
+            
+            logger.info(f"[{agent_path}] Executing shell action: {cmd} (in {workdir})")
+            try:
+                proc = subprocess.run(
+                    cmd,
+                    shell=True,
+                    cwd=str(workdir),
+                    capture_output=True,
+                    text=True,
+                    timeout=120
+                )
+                output = (proc.stdout + "\n" + proc.stderr).strip()
+                logger.info(f"[{agent_path}] Shell action output: {output[:200]}")
+                record_execution_step(
+                    step_num=2,
+                    agent_path=agent_path,
+                    thought=f"Executed command: {cmd}",
+                    tool_call=cmd,
+                    tool_output=output[:500],
+                    memory_snapshot="Shell action executed"
+                )
+            except Exception as ex:
+                logger.error(f"[{agent_path}] Shell execution failed: {ex}")
+
+        # 2. Spawn Department: ```action:spawn_department ... ```
+        dept_blocks = re.findall(r"```action:spawn_department\s*\n(.*?)\n```", content, re.DOTALL)
+        for block in dept_blocks:
+            try:
+                data = json.loads(block.strip())
+                dept_name = data.get("dept_name")
+                if dept_name and comp_name:
+                    logger.info(f"[{agent_path}] Spawning department {dept_name} for company {comp_name}")
+                    spawn_subordinate(
+                        caller_path=agent_path,
+                        target_unit_type="department",
+                        new_agent_name=dept_name,
+                        base_archetype="Dept_Lead_Archetype",
+                        company_name=comp_name,
+                        initial_task_message=data.get("directive")
+                    )
+            except Exception as ex:
+                logger.error(f"Failed to spawn department: {ex}")
+
+        # 3. Spawn Worker: ```action:spawn_worker ... ```
+        worker_blocks = re.findall(r"```action:spawn_worker\s*\n(.*?)\n```", content, re.DOTALL)
+        for block in worker_blocks:
+            try:
+                data = json.loads(block.strip())
+                dept_name = data.get("dept_name")
+                worker_name = data.get("worker_name")
+                if dept_name and worker_name and comp_name:
+                    logger.info(f"[{agent_path}] Spawning worker {worker_name} in {dept_name}")
+                    spawn_subordinate(
+                        caller_path=agent_path,
+                        target_unit_type="worker",
+                        new_agent_name=worker_name,
+                        base_archetype="Worker_Coding_Archetype",
+                        company_name=comp_name,
+                        dept_name=dept_name,
+                        initial_task_message=data.get("directive")
+                    )
+            except Exception as ex:
+                logger.error(f"Failed to spawn worker: {ex}")
 
     async def run_loop(self) -> None:
         self.running = True
